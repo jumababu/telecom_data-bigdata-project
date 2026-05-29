@@ -6,7 +6,7 @@ import random
 # 1. EXTRACT STAGE: Ingest raw telemetry
 # ==========================================
 def extract_raw_data():
-    print("[Extract] Simulating raw telecom telemetry ingestion...")
+    print("[Extract] Ingesting raw telecom telemetry metrics...")
     raw_records = []
     
     for _ in range(49):
@@ -20,7 +20,7 @@ def extract_raw_data():
         
         raw_records.append((customer_id, monthly_bill, complaints, late_payments, usage_gb, contract_type, churn))
     
-    # Intentionally inject a duplicate entry to test cleaning logic 
+    # Inject an intentional duplicate entry to test cleaning logic
     duplicate_record = (raw_records[0][0], 120, 2, 1, 500, 2, 0)
     raw_records.append(duplicate_record)
     
@@ -28,23 +28,27 @@ def extract_raw_data():
     return pd.DataFrame(raw_records, columns=columns)
 
 # ==========================================
-# 2. TRANSFORM STAGE: Clean duplicate records
+# 2. TRANSFORM STAGE: Deduplication & Feature Engineering
 # ==========================================
 def transform_data(df):
     print(f"[Transform] Total raw records received: {len(df)}")
-    duplicate_count = df.duplicated(subset=['customer_id']).sum()
-    print(f"[Transform] Detected {duplicate_count} duplicate customer_id record(s).")
     
-    # Deduplicate the dataset 
-    cleaned_df = df.drop_duplicates(subset=['customer_id'], keep='first')
-    print(f"[Transform] Cleaned records remaining: {len(cleaned_df)}")
-    return cleaned_df
+    # Action A: Deduplicate records
+    df = df.drop_duplicates(subset=['customer_id'], keep='first')
+    
+    # Action B: Feature Engineering (Adding Customer Tenure in months) 
+    print("[Transform] Engineering new AI feature: 'customer_tenure'...") 
+    # We will generate reasonable tenures from 1 to 72 months (up to 6 years)
+    df['customer_tenure'] = [random.randint(1, 72) for _ in range(len(df))]
+    
+    print(f"[Transform] Cleaned & enriched records remaining: {len(df)}")
+    return df
 
 # ==========================================
-# 3. LOAD STAGE: Push polished data to Postgres
+# 3. LOAD STAGE: Push enriched data matrix to Postgres
 # ==========================================
 def load_data_to_postgres(df):
-    print("[Load] Establishing target secure database connection...")
+    print("[Load] Connecting to target data warehouse...")
     try:
         conn = psycopg2.connect(
             dbname="datasetdb",
@@ -56,7 +60,7 @@ def load_data_to_postgres(df):
         conn.autocommit = True
         cursor = conn.cursor()
         
-        print("[Load] Shipping data matrix into 'customer_data'...")
+        print("[Load] Shipping feature-engineered data matrix into 'customer_data'...")
         
         for _, row in df.iterrows():
             cust_id = int(row['customer_id'])
@@ -67,18 +71,23 @@ def load_data_to_postgres(df):
             
             if not exists:
                 postgres_insert_query = """
-                INSERT INTO customer_data (customer_id, monthly_bill, complaints, late_payments, usage_gb, contract_type, churn)
-                VALUES (%s, %s, %s, %s, %s, %s, %s);
+                INSERT INTO customer_data (customer_id, monthly_bill, complaints, late_payments, usage_gb, contract_type, churn, customer_tenure)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
                 """
                 record_to_insert = (
                     cust_id, int(row['monthly_bill']), int(row['complaints']),
-                    int(row['late_payments']), int(row['usage_gb']), int(row['contract_type']), int(row['churn'])
+                    int(row['late_payments']), int(row['usage_gb']), int(row['contract_type']), 
+                    int(row['churn']), int(row['customer_tenure'])
                 )
                 cursor.execute(postgres_insert_query, record_to_insert)
             else:
-                print(f"[Load] Skipping customer_id {cust_id} (Already exists in database)")
+                # If it already exists, let's update the tenure value for that customer
+                cursor.execute(
+                    "UPDATE customer_data SET customer_tenure = %s WHERE customer_id = %s;",
+                    (int(row['customer_tenure']), cust_id)
+                )
                 
-        print("[Load] ETL target sync finalized cleanly!")
+        print("[Load] Pipeline synchronized smoothly!")
         
     except Exception as e:
         print(f"[Load] ERROR: Pipeline write failed -> {e}")
@@ -87,10 +96,9 @@ def load_data_to_postgres(df):
             cursor.close()
             conn.close()
 
-# Orchestrator
 if __name__ == "__main__":
-    print("--- STARTING TELECOM ETL PIPELINE RUN ---")
+    print("--- STARTING ENRICHED TELECOM ETL PIPELINE RUN ---")
     raw_data = extract_raw_data()
-    cleaned_data = transform_data(raw_data)
-    load_data_to_postgres(cleaned_data)
+    enriched_data = transform_data(raw_data)
+    load_data_to_postgres(enriched_data)
     print("--- ETL PIPELINE COMPLETE ---")
