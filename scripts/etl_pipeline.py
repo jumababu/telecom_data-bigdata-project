@@ -1,9 +1,10 @@
 import psycopg2
+from psycopg2.extras import execute_values
 import pandas as pd
 import random
 
 # ==========================================
-# 1. EXTRACT STAGE: Ingest raw telemetry
+# 1. EXTRACT STAGE: Vectorized Generation
 # ==========================================
 def extract_raw_data():
     print("[Extract] Ingesting raw telecom telemetry metrics...")
@@ -20,7 +21,6 @@ def extract_raw_data():
         
         raw_records.append((customer_id, monthly_bill, complaints, late_payments, usage_gb, contract_type, churn))
     
-    # Inject an intentional duplicate entry to test cleaning logic
     duplicate_record = (raw_records[0][0], 120, 2, 1, 500, 2, 0)
     raw_records.append(duplicate_record)
     
@@ -28,24 +28,20 @@ def extract_raw_data():
     return pd.DataFrame(raw_records, columns=columns)
 
 # ==========================================
-# 2. TRANSFORM STAGE: Deduplication & Feature Engineering
+# 2. TRANSFORM STAGE: Vectorized Operations
 # ==========================================
 def transform_data(df):
     print(f"[Transform] Total raw records received: {len(df)}")
     
-    # Action A: Deduplicate records
-    df = df.drop_duplicates(subset=['customer_id'], keep='first')
-    
-    # Action B: Feature Engineering (Adding Customer Tenure in months) 
-    print("[Transform] Engineering new AI feature: 'customer_tenure'...") 
-    # We will generate reasonable tenures from 1 to 72 months (up to 6 years)
+    df = df.drop_duplicates(subset=['customer_id'], keep='first').copy()
+    print("[Transform] Engineering new AI feature: 'customer_tenure'...")
     df['customer_tenure'] = [random.randint(1, 72) for _ in range(len(df))]
     
     print(f"[Transform] Cleaned & enriched records remaining: {len(df)}")
     return df
 
 # ==========================================
-# 3. LOAD STAGE: Push enriched data matrix to Postgres
+# 3. LOAD STAGE: Optimized Blazing Fast Bulk Batch Write
 # ==========================================
 def load_data_to_postgres(df):
     print("[Load] Connecting to target data warehouse...")
@@ -57,47 +53,64 @@ def load_data_to_postgres(df):
             host="localhost",
             port="5432"
         )
-        conn.autocommit = True
         cursor = conn.cursor()
         
-        print("[Load] Shipping feature-engineered data matrix into 'customer_data'...")
+        print("[Load] Ensuring structural unique constraint exists on target table...")
+        cursor.execute("""
+            ALTER TABLE customer_data 
+            ADD CONSTRAINT unique_cust_id_constraint UNIQUE (customer_id);
+        """)
+    except psycopg2.Error:
+        conn.rollback()
+    
+    try:
+        print("[Load] Shipping optimized data batch matrix into 'customer_data'...")
         
-        for _, row in df.iterrows():
-            cust_id = int(row['customer_id'])
-            
-            # Pre-check database to see if customer_id exists
-            cursor.execute("SELECT 1 FROM customer_data WHERE customer_id = %s;", (cust_id,))
-            exists = cursor.fetchone()
-            
-            if not exists:
-                postgres_insert_query = """
-                INSERT INTO customer_data (customer_id, monthly_bill, complaints, late_payments, usage_gb, contract_type, churn, customer_tenure)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
-                """
-                record_to_insert = (
-                    cust_id, int(row['monthly_bill']), int(row['complaints']),
-                    int(row['late_payments']), int(row['usage_gb']), int(row['contract_type']), 
-                    int(row['churn']), int(row['customer_tenure'])
-                )
-                cursor.execute(postgres_insert_query, record_to_insert)
-            else:
-                # If it already exists, let's update the tenure value for that customer
-                cursor.execute(
-                    "UPDATE customer_data SET customer_tenure = %s WHERE customer_id = %s;",
-                    (int(row['customer_tenure']), cust_id)
-                )
-                
-        print("[Load] Pipeline synchronized smoothly!")
+        # Pure Python extraction and explicit type casting to destroy any hidden NumPy data types
+        data_tuples = [
+            (
+                int(row['customer_id']), 
+                int(row['monthly_bill']), 
+                int(row['complaints']), 
+                int(row['late_payments']), 
+                int(row['usage_gb']), 
+                int(row['contract_type']), 
+                int(row['churn']), 
+                int(row['customer_tenure'])
+            )
+            for _, row in df.iterrows()
+        ]
+        
+        batch_upsert_query = """
+            INSERT INTO customer_data (customer_id, monthly_bill, complaints, late_payments, usage_gb, contract_type, churn, customer_tenure)
+            VALUES %s
+            ON CONFLICT (customer_id) 
+            DO UPDATE SET 
+                monthly_bill = EXCLUDED.monthly_bill,
+                complaints = EXCLUDED.complaints,
+                late_payments = EXCLUDED.late_payments,
+                usage_gb = EXCLUDED.usage_gb,
+                contract_type = EXCLUDED.contract_type,
+                churn = EXCLUDED.churn,
+                customer_tenure = EXCLUDED.customer_tenure;
+        """
+        
+        execute_values(cursor, batch_upsert_query, data_tuples)
+        conn.commit()
+        print("[Load] Batch optimized pipeline synchronized smoothly!")
         
     except Exception as e:
-        print(f"[Load] ERROR: Pipeline write failed -> {e}")
+        if 'conn' in locals() and conn:
+            conn.rollback()
+        print(f"[Load] ERROR: Optimized batch write failed -> {e}")
+        
     finally:
         if 'conn' in locals() and conn:
             cursor.close()
             conn.close()
 
 if __name__ == "__main__":
-    print("--- STARTING ENRICHED TELECOM ETL PIPELINE RUN ---")
+    print("--- STARTING HIGH-PERFORMANCE TELECOM ETL PIPELINE RUN ---")
     raw_data = extract_raw_data()
     enriched_data = transform_data(raw_data)
     load_data_to_postgres(enriched_data)
